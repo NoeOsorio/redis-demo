@@ -1,0 +1,29 @@
+# Local development only.
+# In production (Porter), remove the redis service entirely and point
+# REDIS_HOST / REDIS_PORT at your Porter-managed Redis instance.
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # REDIS_PASSWORD=   ← set this if your Redis requires auth
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    # Standalone mode — no cluster, no replication, no sentinel.
+    # --save "" --appendonly no = pure in-memory (dev-friendly, no disk writes).
+    command: redis-server --loglevel warning --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

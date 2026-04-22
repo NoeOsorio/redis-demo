@@ -1,0 +1,20 @@
+{
+  "name": "redis-demo",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "security": "bash scripts/security-check.sh",
+    "prepare": "node -e \"const{copyFileSync,chmodSync,mkdirSync}=require('fs');try{mkdirSync('.git/hooks',{recursive:true});copyFileSync('scripts/security-check.sh','.git/hooks/pre-commit');chmodSync('.git/hooks/pre-commit','755');console.log('✅ Git hooks installed');}catch(e){console.warn('⚠️  Could not install git hooks:',e.message);}\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "ioredis": "^5.10.1"
+  }
+}
