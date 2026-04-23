@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 const redis = new Redis({
   host: process.env.REDIS_HOST || 'localhost',
   port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  password: process.env.REDIS_PASSWORD || undefined,
+  password: process.env.REDIS_PASS || undefined,
   lazyConnect: true,
   enableReadyCheck: true,
   maxRetriesPerRequest: 3,

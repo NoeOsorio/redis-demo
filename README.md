@@ -34,7 +34,7 @@ The app is a single container. Redis is **not bundled** — connect it to Porter
 |---|---|---|---|
 | `REDIS_HOST` | Yes | Redis hostname from Porter | `redis-abc123.internal` |
 | `REDIS_PORT` | Yes | Redis port | `6379` |
-| `REDIS_PASSWORD` | If set | Redis auth password | `s3cr3t` |
+| `REDIS_PASS` | If set | Redis auth password | `s3cr3t` |
 | `PORT` | No | App port (Porter sets this automatically) | `3000` |
 
 > **Important:** This app connects in standalone (non-cluster) mode. Do not point it at a Redis Cluster or Sentinel endpoint — use a single Redis instance.
