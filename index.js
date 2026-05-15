@@ -13,17 +13,108 @@ app.use((req, res, next) => {
   next();
 });
 
-const redis = new Redis({
-  host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  password: process.env.REDIS_PASS || undefined,
-  lazyConnect: true,
-  enableReadyCheck: true,
-  maxRetriesPerRequest: 3,
+// ─────────────────────────────────────────────
+// REDIS CONNECTION
+// ─────────────────────────────────────────────
+// Supports three config styles (in priority order):
+//   1. REDIS_URL — e.g. rediss://:pass@host:6379  (rediss:// auto-enables TLS)
+//   2. REDIS_HOST + REDIS_PORT + REDIS_PASS + REDIS_TLS=true
+//   3. Defaults to localhost:6379, no auth, no TLS
+//
+// TLS is auto-enabled when:
+//   - The URL scheme is rediss://, OR
+//   - REDIS_TLS is "true" / "1", OR
+//   - The host matches *.cache.amazonaws.com (AWS ElastiCache w/ encryption in transit)
+
+const redactCreds = (msg) =>
+  String(msg ?? '').replace(/(rediss?:\/\/)([^:\s]+):([^@\s]+)@/gi, '$1$2:***@');
+const maskHost = (h) => {
+  if (!h) return '(unset)';
+  if (h.length <= 40) return h;
+  return `${h.slice(0, 25)}…${h.slice(-12)}`;
+};
+
+function buildRedisConfig() {
+  const url = (process.env.REDIS_URL || '').trim();
+  const host = process.env.REDIS_HOST || 'localhost';
+  const port = parseInt(process.env.REDIS_PORT || '6379', 10);
+  const password = process.env.REDIS_PASS || undefined;
+  const tlsEnv = (process.env.REDIS_TLS || '').toLowerCase();
+  const isElastiCache = /\.cache\.amazonaws\.com$/i.test(host) ||
+                        /\.cache\.amazonaws\.com[:/]/i.test(url);
+  const tlsFromUrl = url.startsWith('rediss://');
+  const tlsFromEnv = tlsEnv === 'true' || tlsEnv === '1' || tlsEnv === 'yes';
+  const useTLS = tlsFromUrl || tlsFromEnv || isElastiCache;
+  const configured = !!(url || process.env.REDIS_HOST);
+
+  const baseOpts = {
+    lazyConnect: true,
+    enableReadyCheck: true,
+    maxRetriesPerRequest: 3,
+    connectTimeout: 10_000,
+  };
+  if (useTLS) baseOpts.tls = {};
+
+  return {
+    url: url || null,
+    options: url ? baseOpts : { ...baseOpts, host, port, password },
+    summary: {
+      source: url ? 'REDIS_URL' : 'REDIS_HOST/PORT/PASS',
+      host: url ? '(from URL)' : maskHost(host),
+      port: url ? '(from URL)' : port,
+      tls: useTLS,
+      tlsReason: tlsFromUrl ? 'rediss:// URL' : tlsFromEnv ? 'REDIS_TLS env' : isElastiCache ? 'ElastiCache hostname' : 'off',
+      auth: url ? /:[^/@]+@/.test(url) : !!password,
+      configured,
+    },
+  };
+}
+
+const redisCfg = buildRedisConfig();
+const redis = redisCfg.url
+  ? new Redis(redisCfg.url, redisCfg.options)
+  : new Redis(redisCfg.options);
+
+const redisState = {
+  connected: false,
+  ready: false,
+  configured: redisCfg.summary.configured,
+  error: null,
+  lastErrorAt: null,
+  attempts: 0,
+};
+
+console.log(`[redis] init source=${redisCfg.summary.source} host=${redisCfg.summary.host} port=${redisCfg.summary.port} tls=${redisCfg.summary.tls} (${redisCfg.summary.tlsReason}) auth=${redisCfg.summary.auth}`);
+
+redis.on('connect', () => {
+  redisState.connected = true;
+  redisState.error = null;
+  console.log(`[redis] tcp connected → ${redisCfg.summary.host}:${redisCfg.summary.port}`);
+});
+redis.on('ready', () => {
+  redisState.ready = true;
+  console.log('[redis] ready (handshake + AUTH complete)');
+});
+redis.on('error', (err) => {
+  redisState.connected = false;
+  redisState.ready = false;
+  redisState.error = redactCreds(err.message);
+  redisState.lastErrorAt = new Date().toISOString();
+  console.error(`[redis] error code=${err.code || 'UNKNOWN'} syscall=${err.syscall || '-'} msg=${redactCreds(err.message)}`);
+});
+redis.on('close', () => {
+  redisState.connected = false;
+  redisState.ready = false;
+  console.warn('[redis] connection closed');
+});
+redis.on('reconnecting', (delay) => {
+  redisState.attempts += 1;
+  console.warn(`[redis] reconnecting in ${delay}ms (attempt ${redisState.attempts})`);
 });
 
-redis.on('connect', () => console.log('✅ Redis connected'));
-redis.on('error', (err) => console.error('❌ Redis error:', err.message));
+redis.connect().catch((err) => {
+  console.error(`[redis] initial connect failed: ${redactCreds(err.message)}`);
+});
 
 const esc = (str) => String(str)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -232,11 +323,43 @@ const CSS = `
   .tip{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--muted);
     line-height:1.6;margin:10px 0}
   .tip-icon{flex-shrink:0;font-size:16px;margin-top:1px}
+
+  /* ── Connection banner ── */
+  .banner{padding:14px 22px;border-bottom:1px solid var(--border);font-size:13px;line-height:1.6}
+  .banner-err{background:rgba(248,81,73,.08);color:var(--text);
+    border-bottom:1px solid rgba(248,81,73,.3)}
+  .banner-warn{background:rgba(210,153,34,.08);color:var(--text);
+    border-bottom:1px solid rgba(210,153,34,.3)}
+  .banner-title{font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+  .banner-err .banner-title{color:var(--red)}
+  .banner-warn .banner-title{color:var(--yellow)}
+  .banner-msg{color:var(--muted);font-family:"SF Mono","Fira Code",monospace;font-size:12px;
+    word-break:break-word;margin-bottom:4px}
+  .banner-hint{color:var(--muted);font-size:12px}
+  .banner code{font-size:11px;padding:1px 5px}
 `;
 
 // ─────────────────────────────────────────────
 // PAGE SHELL
 // ─────────────────────────────────────────────
+function renderBanner() {
+  if (redisState.ready) return '';
+  if (!redisState.configured) {
+    return `<div class="banner banner-warn">
+      <div class="banner-title">⚠️ No Redis credentials configured</div>
+      <div class="banner-hint">Set <code>REDIS_URL</code> <em>or</em> <code>REDIS_HOST</code> / <code>REDIS_PORT</code> / <code>REDIS_PASS</code>. Defaulting to <code>localhost:6379</code>.</div>
+    </div>`;
+  }
+  const hint = redisCfg.summary.host && /amazonaws\.com/i.test(String(redisCfg.summary.host))
+    ? `Looks like AWS ElastiCache — encryption in transit requires TLS. Set <code>REDIS_TLS=true</code> or use a <code>rediss://</code> URL.`
+    : `Check the host/port are reachable from this container, that <code>REDIS_PASS</code> matches, and whether the server requires TLS (<code>REDIS_TLS=true</code>).`;
+  return `<div class="banner banner-err">
+    <div class="banner-title">⚠️ Redis is not connected</div>
+    <div class="banner-msg">${esc(redisState.error || 'connection not established yet')}</div>
+    <div class="banner-hint">${hint}</div>
+  </div>`;
+}
+
 const page = (title, body, current = '') => `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -246,6 +369,7 @@ const page = (title, body, current = '') => `<!DOCTYPE html>
   <style>${CSS}</style>
 </head>
 <body>
+${renderBanner()}
 <nav>
   <a href="/" class="nav-brand">⚡ Redis Lessons</a>
   <a href="/cache"       class="ni ${current==='cache'?'on':''}">📦 Caching</a>
@@ -988,6 +1112,46 @@ app.get('/keys', async (req, res) => {
 
     <p style="margin-top:16px"><a href="/keys">↺ Refresh to see the latest state</a></p>
   `, 'keys'));
+});
+
+// ─────────────────────────────────────────────
+// ERROR HANDLER — catches Redis failures during request handling
+// ─────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  const safeMsg = redactCreds(err?.message || String(err));
+  console.error(`[http] ${req.method} ${req.path} → ${err?.code || 'ERR'} ${safeMsg}`);
+  if (res.headersSent) return next(err);
+  res.status(503).send(page('Redis unavailable', `
+    <div class="lh">
+      <div class="lh-icon">🔌</div>
+      <div>
+        <div class="lh-num">Connection error</div>
+        <div class="lh-title">The app couldn't reach Redis</div>
+        <div class="lh-sub">This page needs Redis to render — the rest of the app is fine.</div>
+      </div>
+    </div>
+
+    <div class="card card-problem">
+      <div class="card-label">🔴 Error from ioredis</div>
+      <p style="font-family:monospace;font-size:13px;word-break:break-word">${esc(safeMsg)}</p>
+      <p style="margin-top:8px;font-size:12px">
+        Target: <code>${esc(String(redisCfg.summary.host))}:${esc(String(redisCfg.summary.port))}</code>
+        · TLS: <code>${redisCfg.summary.tls ? 'on' : 'off'}</code> (${esc(redisCfg.summary.tlsReason)})
+        · Auth: <code>${redisCfg.summary.auth ? 'yes' : 'no'}</code>
+      </p>
+    </div>
+
+    <div class="card card-insight">
+      <div class="card-label">💡 Things to check</div>
+      <ul style="padding-left:20px;color:var(--muted);line-height:1.9;font-size:13px">
+        <li><code>REDIS_HOST</code>, <code>REDIS_PORT</code>, <code>REDIS_PASS</code> match the server's actual values</li>
+        <li><strong>AWS ElastiCache</strong>: if "encryption in transit" is enabled, the client must use TLS — set <code>REDIS_TLS=true</code> or use a <code>rediss://</code> URL</li>
+        <li>Security groups / VPC: the app's network must be allowed to reach the endpoint on its port</li>
+        <li>Use the <em>primary</em> / cluster endpoint, not a node endpoint</li>
+        <li>If using cluster mode, this app uses standalone ioredis — point it at the primary node or a non-clustered cache</li>
+      </ul>
+    </div>
+  `));
 });
 
 // ─────────────────────────────────────────────
